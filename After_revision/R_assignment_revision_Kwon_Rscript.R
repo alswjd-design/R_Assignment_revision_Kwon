@@ -1,0 +1,170 @@
+
+# 1. Load libraries
+
+library(dplyr)
+library(tidyr)
+library(readr)
+
+#====================================
+###dplyr provides functions such as:
+
+#filter() → choose rows based on conditions
+
+#select() → choose columns
+
+#arrange() → sort rows
+
+#mutate() → create new variables
+
+#summarize() → calculate summary statistics
+
+
+# 2. Load data
+
+genotypes <- read_tsv("https://raw.githubusercontent.com/EEOB-BioData/BCB5460_Spring2026/main/assignments/UNIX_Assignment/fang_et_al_genotypes.txt")
+
+snp_pos <- read_tsv("https://raw.githubusercontent.com/EEOB-BioData/BCB5460_Spring2026/main/assignments/UNIX_Assignment/snp_position.txt")
+
+
+# 3. Inspect data
+
+head(genotypes) #first row
+dim(genotypes) #dimenstion (column and row)
+colnames(genotypes) #column names
+
+head(snp_pos)
+dim(snp_pos)
+colnames(snp_pos)
+
+#============================
+### Both files have "SNP_ID".But Genoypes have SNP_ID as rows and SNP_Pos have them in one column. Nee to transpose one of them so I can join two files.
+
+
+# 4. Transpose genotype data 
+##### Response to comments: I found out that this will make an error on #7.
+##### Reason of the error: R force to change names if column names start with a number nor specific character like -. 
+##### But when I transpose genotypes file, Sample_ID becomes column which start with number or specific character.
+##### Use check.names = FALSE. to force R to keep Sample_ID exactly as they are.
+
+geno_only <- genotypes[, -c(1:3)]
+geno_t <- t(geno_only)
+
+# check.names = FALSE to prevent errors later
+geno_df <- as.data.frame(geno_t, check.names = FALSE) 
+colnames(geno_df) <- genotypes$Sample_ID
+
+# Make SNP_ID (same column) is created for joining two files
+geno_df$SNP_ID <- rownames(geno_df)
+
+
+# 5. Prepare SNP position table
+##### Response to comments: Thank you for the comments. The first line of this chunk was deleted somehow so snp_info file was not created which cause all errors downstream.
+snp_info <- snp_pos %>% 
+  select(SNP_ID, Chromosome, Position) %>% 
+  mutate(Chromosome = as.numeric(Chromosome), 
+         Position = as.numeric(Position))
+
+
+# 6. Join genotype and position data
+##### Error: Downstream error was due to the name of this file. I created combined file then used another name for the downstream. I fixed all names. 
+combined <- inner_join(snp_info, geno_df, by="SNP_ID")
+
+
+# 7. Separate maize and teosinte groups
+maize_ids <- genotypes %>%
+  filter(Group %in% c("ZMMIL","ZMMLR","ZMMMR")) %>%
+  pull(Sample_ID)
+
+teosinte_ids <- genotypes %>%
+  filter(Group %in% c("ZMPBA","ZMPIL","ZMPJA")) %>%
+  pull(Sample_ID)
+
+maize_data <- combined %>%
+  select(SNP_ID, Chromosome, Position, all_of(maize_ids))
+
+teosinte_data <- combined %>%
+  select(SNP_ID, Chromosome, Position, all_of(teosinte_ids))
+
+# 8. Replace missing data
+maize_data[maize_data == "N"] <- "?"
+teosinte_data[teosinte_data == "N"] <- "?"
+
+# 9. Function to create chromosome files
+
+create_files <- function(data, prefix){
+  chromosomes <- 1:10
+  
+  lapply(chromosomes, function(chr){
+    
+    chr_data <- data %>% filter(Chromosome == chr)
+    
+    inc <- chr_data %>% arrange(Position)
+    write_tsv(inc, paste0(prefix, "_chr", chr, "_inc.txt"))
+    
+    dec <- chr_data %>% arrange(desc(Position))
+    dec[dec == "?"] <- "-"
+    
+    write_tsv(dec, paste0(prefix, "_chr", chr, "_dec.txt"))
+  })
+}
+
+create_files(maize_data, "maize")
+create_files(teosinte_data, "teosinte")
+
+#===========================================
+
+#Visualization
+
+library(ggplot2)
+
+
+# 1. SNPs per chromosome 
+snp_counts <- combined %>%
+  group_by(Chromosome) %>%
+  summarise(SNP_count = n())
+
+ggplot(snp_counts, aes(x = factor(Chromosome), y = SNP_count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Number of SNPs per Chromosome",
+    x = "Chromosome",
+    y = "Number of SNPs"
+  ) +
+  theme_minimal()
+
+# 2. Missing data and amount of heterozygosity
+## Reshape data to "long" format
+maize_long <- maize_data %>% 
+  pivot_longer(cols = -c(SNP_ID, Chromosome, Position), names_to = "Sample_ID", values_to = "Genotype") %>%
+  mutate(Group = "Maize")
+
+teosinte_long <- teosinte_data %>% 
+  pivot_longer(cols = -c(SNP_ID, Chromosome, Position), names_to = "Sample_ID", values_to = "Genotype") %>%
+  mutate(Group = "Teosinte")
+
+tidy_genotypes <- bind_rows(maize_long, teosinte_long)
+
+## Create the Status column (Homozygous, Heterozygous, or Missing)
+tidy_genotypes <- tidy_genotypes %>%
+  mutate(Status = case_when(
+    Genotype %in% c("?/?", "?", "N/N") ~ "Missing",
+    substr(Genotype, 1, 1) == substr(Genotype, 3, 3) ~ "Homozygous",
+    TRUE ~ "Heterozygous"
+  ))
+
+## Plot normalized proportions
+ggplot(tidy_genotypes, aes(x = Group, fill = Status)) +
+  geom_bar(position = "fill") + # This normalizes the height to 100% (proportion)
+  labs(title = "Proportion of Genotype Status by Group", y = "Proportion", x = "Group") +
+  theme_minimal()
+
+
+
+# 3.
+
+ggplot(combined, aes(x = Position)) +
+  geom_histogram(bins = 50, fill = "darkgreen", color = "white") +
+  facet_wrap(~Chromosome, scales = "free_x") +
+  labs(title = "SNP Density Across Chromosomes", x = "Genomic Position", y = "SNP Count") +
+  theme_minimal()
+
